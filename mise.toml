@@ -1,0 +1,17 @@
+[tools]
+python = "3.12.14"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.setup]
+description = "Install Srclight and development dependencies into the mise virtualenv"
+run = "python -m pip install -e '.[dev]'"
+
+[tasks.test]
+description = "Run the Srclight regression suite"
+run = "python -m pytest"
+
+[tasks.srclight]
+description = "Run the local Srclight checkout"
+run = "srclight"
