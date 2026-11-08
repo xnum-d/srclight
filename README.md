@@ -6,6 +6,14 @@
 [![License](https://img.shields.io/github/license/srclight/srclight)](https://github.com/srclight/srclight/blob/master/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/srclight)](https://pypi.org/project/srclight/)
 
+> **This is a fork.** [xnum-d/srclight](https://github.com/xnum-d/srclight) adds AST-based
+> indexing for **F#** and **Elixir**, a schema (v6) that keeps same-line definitions distinct,
+> and `parse_errors` reporting for files a grammar could only partially parse. It is **not on
+> PyPI**: `pip install srclight` installs the unmodified upstream release, which reports the
+> same version (`0.25.3`) and has none of this. Install with
+> `pip install "srclight @ git+https://github.com/xnum-d/srclight@develop"`.
+> Details, limitations and the upstream sync workflow: [docs/fork.md](docs/fork.md).
+
 **Deep code indexing for AI agents.** SQLite FTS5 + tree-sitter + embeddings + MCP.
 
 Srclight builds a rich, searchable index of your codebase that AI coding agents can query instantly — replacing dozens of grep/glob calls with precise, structured lookups. It is the most comprehensive code intelligence MCP server available: 42 tools covering symbol search, relationship graphs, community detection, impact analysis, git change intelligence, semantic search, build system awareness, and document extraction — capabilities no other single MCP server combines. Fully local and private: your code never leaves your machine.
@@ -167,6 +175,9 @@ Database schema v6 preserves same-line definitions by qualified identity and
 source column. Existing indexes are migrated without replacing symbol IDs,
 parent links, graph edges or embedding records.
 
+Migration details, the dependency chain, development workflow and the known
+limitations of this fork: [docs/fork.md](docs/fork.md).
+
 ## Graph resolution labels
 
 Reference edges are built by name matching plus ranked evidence, and every
@@ -185,6 +196,7 @@ are safe to treat as resolved.
 
 - **Python 3.11+**
 - **Git** (for change intelligence and auto-reindex hooks)
+- **A C compiler** (this fork builds the F# grammar from source — the companion fork has no prebuilt wheels)
 - **Ollama** (optional, for semantic search / embeddings) — [ollama.com](https://ollama.com)
 - **NVIDIA GPU + cupy** (optional, for GPU-accelerated vector search)
 - **Poppler** (optional, for PaddleOCR scanned-PDF support) — `apt install poppler-utils` / `brew install poppler`
@@ -205,33 +217,40 @@ mise exec -- srclight serve --transport stdio --db ../my-project/.srclight/index
 For an MCP client, use this checkout's absolute `.venv/bin/srclight` executable,
 arguments `["serve", "--transport", "stdio"]`, and the indexed project as `cwd`.
 An explicit `--transport stdio` matters: the upstream default is SSE.
-Install from this checkout, not the unmodified PyPI package, to get these adapters.
+Install from this checkout or the fork's git URL, not the unmodified PyPI
+package, to get these adapters — see [docs/fork.md](docs/fork.md#install).
 
 ## Quick Start
 
 ```bash
-# Install from PyPI
-pip install srclight
+# Install this fork (F# and Elixir indexing). Needs git and a C compiler:
+# the F# grammar has no prebuilt wheels and is compiled from source.
+SRC="git+https://github.com/xnum-d/srclight@develop"
+pip install "srclight @ $SRC"
 
-# Install from source
-git clone https://github.com/srclight/srclight.git
+# Or from a clone of this fork (development install)
+git clone https://github.com/xnum-d/srclight.git
 cd srclight
-pip install -e .
+pip install -e '.[dev]'
 
 # Optional: document format support (PDF, DOCX, XLSX, HTML, images)
-pip install 'srclight[docs,pdf]'
+pip install "srclight[docs,pdf] @ $SRC"
 
 # Optional: OCR for scanned PDFs (also needs poppler-utils on your system)
-pip install 'srclight[pdf,paddleocr]'
+pip install "srclight[pdf,paddleocr] @ $SRC"
 
 # Optional: OCR for images (needs tesseract on your system)
-pip install 'srclight[docs,ocr]'
+pip install "srclight[docs,ocr] @ $SRC"
 
 # Optional: GPU-accelerated vector search (requires CUDA 12.x)
-pip install 'srclight[gpu]'
+pip install "srclight[gpu] @ $SRC"
 
 # Everything (docs + pdf + ocr + paddleocr + gpu)
-pip install 'srclight[all]'
+pip install "srclight[all] @ $SRC"
+
+# NOTE: plain `pip install srclight` installs the upstream PyPI release, which
+# reports the same version (0.25.3) and has no F# or Elixir support. Re-run with
+# --force-reinstall after the branch moves: the version number does not change.
 
 # Index your project
 cd /path/to/your/project
