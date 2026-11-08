@@ -2,12 +2,12 @@
 
 import pytest
 
-from srclight.db import Database, FileRecord, SymbolRecord, EdgeRecord
+from srclight.db import SCHEMA_VERSION, Database, FileRecord, SymbolRecord, EdgeRecord
 
 
 @pytest.fixture
 def db(tmp_path):
-    """Create a temporary database with schema v5."""
+    """Create a temporary database with the current schema."""
     db_path = tmp_path / "test.db"
     db = Database(db_path)
     db.open()
@@ -256,8 +256,8 @@ def test_compute_impact_higher_risk_for_bridge(db):
     assert len(result["affected_flows"]) >= 1
 
 
-def test_schema_v5_migration(tmp_path):
-    """DB should migrate from v4 to v5, adding community/flow tables."""
+def test_schema_creates_the_community_tables(tmp_path):
+    """DB should carry the community/flow tables, at whatever version is current."""
     db_path = tmp_path / "migrate.db"
     db = Database(db_path)
     db.open()
@@ -275,7 +275,7 @@ def test_schema_v5_migration(tmp_path):
     version = db.conn.execute(
         "SELECT value FROM schema_info WHERE key = 'schema_version'"
     ).fetchone()["value"]
-    assert version == "5"
+    assert version == str(SCHEMA_VERSION)
 
     db.close()
 

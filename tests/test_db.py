@@ -1,11 +1,20 @@
 """Tests for the database layer."""
 
+import json
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from srclight.db import Database, FileRecord, SymbolRecord, EdgeRecord, content_hash, is_vendored_path
+from srclight.db import (
+    SCHEMA_VERSION,
+    Database,
+    EdgeRecord,
+    FileRecord,
+    SymbolRecord,
+    content_hash,
+    is_vendored_path,
+)
 
 
 @pytest.fixture
@@ -444,3 +453,191 @@ def test_vendored_path_covers_the_common_conventions(path, vendored):
     that repository's config, so it covers conventions rather than places.
     """
     assert is_vendored_path(path) is vendored, path
+
+
+# --- schema v6: the symbol identity migration ---
+
+# What every release from v0.8.0 through v5 wrote. v6 widens the identity
+# constraint, so an upgrade has to recognize a table built from this shape.
+_PRE_V6_SYMBOLS_DDL = """CREATE TABLE symbols_v5 (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    name TEXT,
+    qualified_name TEXT,
+    signature TEXT,
+    return_type TEXT,
+    parameters TEXT,         -- JSON array
+    visibility TEXT,
+    is_async INTEGER DEFAULT 0,
+    is_static INTEGER DEFAULT 0,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    doc_comment TEXT,
+    body_hash TEXT,
+    line_count INTEGER,
+    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+    metadata TEXT,           -- JSON
+    UNIQUE(file_id, kind, name, start_line)
+)"""
+
+_PRE_V6_COLUMNS = """id, file_id, kind, name, qualified_name, signature, return_type,
+    parameters, visibility, is_async, is_static, start_line, end_line, content,
+    doc_comment, body_hash, line_count, parent_symbol_id, metadata"""
+
+
+def _downgrade_to_v5(db, ddl: str = _PRE_V6_SYMBOLS_DDL) -> None:
+    """Rebuild `symbols` in the pre-v6 shape, keeping rows, ids and FTS entries."""
+    db.commit()
+    db.conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        db.conn.execute("BEGIN IMMEDIATE")
+        db.conn.execute("DROP TABLE IF EXISTS symbols_v5")
+        db.conn.execute(ddl)
+        db.conn.execute(f"INSERT INTO symbols_v5 ({_PRE_V6_COLUMNS}) "
+                        f"SELECT {_PRE_V6_COLUMNS} FROM symbols")
+        db.conn.execute("DROP TABLE symbols")
+        db.conn.execute("ALTER TABLE symbols_v5 RENAME TO symbols")
+        db.conn.execute(
+            "INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', '5')"
+        )
+        db.commit()
+    finally:
+        db.conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _v5_index(tmp_path, ddl: str = _PRE_V6_SYMBOLS_DDL) -> tuple[Path, dict[str, int]]:
+    """A pre-v6 index holding a parent link, an edge, an embedding and FTS rows."""
+    path = tmp_path / "v5.db"
+    db = Database(path)
+    db.open()
+    db.initialize()
+    fid = db.upsert_file(FileRecord(path="src/auth.fs", content_hash="h1", mtime=1.0,
+                                    language="fsharp", size=80, line_count=4))
+    module_id = db.insert_symbol(SymbolRecord(
+        file_id=fid, kind="module", name="Auth", qualified_name="Auth",
+        content="module Auth", start_line=1, end_line=1, line_count=1,
+        body_hash="b0"), "src/auth.fs")
+    login_id = db.insert_symbol(SymbolRecord(
+        file_id=fid, kind="function", name="login", qualified_name="Auth.login",
+        signature="login user pass", content="let login user pass = true",
+        doc_comment="Log a user in.", start_line=3, end_line=3, line_count=1,
+        body_hash="b1", parent_symbol_id=module_id, metadata={"arity": 2}), "src/auth.fs")
+    db.insert_edge(EdgeRecord(source_id=login_id, target_id=module_id,
+                              edge_type="calls", confidence=0.9))
+    db.upsert_embedding(login_id, "test-model", 4, b"\x01\x02\x03\x04", "b1")
+    _downgrade_to_v5(db, ddl)
+    db.close()
+    return path, {"file": fid, "module": module_id, "login": login_id}
+
+
+def _symbols_ddl(db) -> str:
+    return db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='symbols'"
+    ).fetchone()[0]
+
+
+def test_v5_index_survives_the_v6_migration(tmp_path):
+    """An existing index keeps its ids, links, embeddings and search.
+
+    The migration only runs on a database that already lacks start_column, so no
+    fixture that builds a fresh index can reach it: this one rebuilds the old
+    table around real rows first.
+    """
+    path, ids = _v5_index(tmp_path)
+    db = Database(path)
+    db.open()
+    db.initialize()
+
+    version = db.conn.execute(
+        "SELECT value FROM schema_info WHERE key = 'schema_version'").fetchone()[0]
+    assert version == str(SCHEMA_VERSION)
+
+    rows = {row["id"]: row for row in db.conn.execute("SELECT * FROM symbols")}
+    assert set(rows) == {ids["module"], ids["login"]}, "symbol ids must not be replaced"
+    login = rows[ids["login"]]
+    assert login["content"] == "let login user pass = true"
+    assert login["doc_comment"] == "Log a user in."
+    assert json.loads(login["metadata"]) == {"arity": 2}
+    assert login["parent_symbol_id"] == ids["module"]
+    assert login["start_column"] == 0
+
+    assert db.conn.execute("SELECT COUNT(*) FROM symbol_edges").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM symbol_embeddings").fetchone()[0] == 1
+    assert ids["login"] in [hit["symbol_id"] for hit in db.search_symbols("login")]
+    db.close()
+
+
+def test_migrated_symbols_table_matches_a_fresh_one(tmp_path):
+    """An upgraded index and a new one are the same schema, column order included.
+
+    The first implementation ALTERed start_column onto the old table and copied
+    `SELECT *` positionally, so an upgraded index kept the pre-v6 column order.
+    """
+    migrated_path, _ = _v5_index(tmp_path)
+    migrated = Database(migrated_path)
+    migrated.open()
+    migrated.initialize()
+
+    fresh = Database(tmp_path / "fresh.db")
+    fresh.open()
+    fresh.initialize()
+
+    def shape(db) -> tuple:
+        columns = [(row["name"], row["type"], row["notnull"], row["dflt_value"])
+                   for row in db.conn.execute("PRAGMA table_info(symbols)")]
+        return columns, _symbols_ddl(db)[_symbols_ddl(db).index("("):]
+
+    assert shape(migrated) == shape(fresh)
+    migrated.close()
+    fresh.close()
+
+
+@pytest.mark.parametrize("ddl", [
+    _PRE_V6_SYMBOLS_DDL,
+    # The upgrade must not depend on how the old release spelled its constraint.
+    _PRE_V6_SYMBOLS_DDL.replace(
+        "UNIQUE(file_id, kind, name, start_line)",
+        "UNIQUE (file_id,kind,name,start_line)",
+    ),
+])
+def test_migrated_index_keeps_two_definitions_on_one_line(tmp_path, ddl):
+    """Same-line scopes and arities are why v6 exists; a migrated index agrees."""
+    path, ids = _v5_index(tmp_path, ddl=ddl)
+    db = Database(path)
+    db.open()
+    db.initialize()
+
+    first = db.insert_symbol(SymbolRecord(
+        file_id=ids["file"], kind="function", name="parse", qualified_name="Json.parse",
+        content="let parse s = s", start_line=9, end_line=9, start_column=0,
+        line_count=1, body_hash="p1"), "src/auth.fs")
+    second = db.insert_symbol(SymbolRecord(
+        file_id=ids["file"], kind="function", name="parse", qualified_name="Xml.parse",
+        content="let parse x = x", start_line=9, end_line=9, start_column=4,
+        line_count=1, body_hash="p2"), "src/auth.fs")
+
+    assert first != second, "the second definition replaced the first"
+    kept = {row["qualified_name"] for row in db.conn.execute(
+        "SELECT qualified_name FROM symbols WHERE start_line = 9")}
+    assert kept == {"Json.parse", "Xml.parse"}
+    db.close()
+
+
+def test_migration_runs_once(tmp_path):
+    """server.py opens and initializes the same index many times per session."""
+    path, _ = _v5_index(tmp_path)
+    db = Database(path)
+    db.open()
+    db.initialize()
+    before = [(row["id"], row["body_hash"]) for row in
+              db.conn.execute("SELECT id, body_hash FROM symbols ORDER BY id")]
+
+    db.initialize()
+    db.initialize()
+
+    after = [(row["id"], row["body_hash"]) for row in
+             db.conn.execute("SELECT id, body_hash FROM symbols ORDER BY id")]
+    assert after == before
+    db.close()

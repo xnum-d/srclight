@@ -163,7 +163,33 @@ def split_identifier(name: str) -> str:
 
     return " ".join(result_parts)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+# One source of truth for the symbols table: SCHEMA_SQL creates it, and the
+# pre-v6 upgrade rebuilds an existing one from exactly these columns.
+_SYMBOLS_COLUMNS = """(
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    name TEXT,
+    qualified_name TEXT,
+    signature TEXT,
+    return_type TEXT,
+    parameters TEXT,         -- JSON array
+    visibility TEXT,
+    is_async INTEGER DEFAULT 0,
+    is_static INTEGER DEFAULT 0,
+    start_line INTEGER NOT NULL,
+    start_column INTEGER NOT NULL DEFAULT 0,
+    end_line INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    doc_comment TEXT,
+    body_hash TEXT,
+    line_count INTEGER,
+    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+    metadata TEXT,           -- JSON
+    UNIQUE(file_id, kind, name, qualified_name, start_line, start_column)
+)"""
 
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -188,28 +214,7 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 -- Symbols (functions, classes, methods, structs — AST-level chunks)
-CREATE TABLE IF NOT EXISTS symbols (
-    id INTEGER PRIMARY KEY,
-    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    name TEXT,
-    qualified_name TEXT,
-    signature TEXT,
-    return_type TEXT,
-    parameters TEXT,         -- JSON array
-    visibility TEXT,
-    is_async INTEGER DEFAULT 0,
-    is_static INTEGER DEFAULT 0,
-    start_line INTEGER NOT NULL,
-    end_line INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    doc_comment TEXT,
-    body_hash TEXT,
-    line_count INTEGER,
-    parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-    metadata TEXT,           -- JSON
-    UNIQUE(file_id, kind, name, start_line)
-);
+CREATE TABLE IF NOT EXISTS symbols """ + _SYMBOLS_COLUMNS + """;
 
 -- FTS5 Index 1: Symbol names (code-aware tokenization)
 -- name_tokens stores split identifiers (CamelCase/snake_case -> words)
@@ -371,6 +376,7 @@ class SymbolRecord:
     is_async: bool = False
     is_static: bool = False
     start_line: int = 0
+    start_column: int = 0
     end_line: int = 0
     content: str = ""
     doc_comment: str | None = None
@@ -484,6 +490,7 @@ class Database:
         """Create all tables and indexes."""
         assert self.conn is not None
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate_symbol_identity()
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_info (key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -535,6 +542,41 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_flow_steps_symbol ON flow_steps(symbol_id);
             """)
         self.conn.commit()
+
+    def _migrate_symbol_identity(self) -> None:
+        """Preserve distinct same-line scopes/arities without changing symbol IDs."""
+        assert self.conn is not None
+        existing = [row["name"] for row in self.conn.execute("PRAGMA table_info(symbols)")]
+        if "start_column" in existing:
+            return
+        columns = ", ".join(existing)
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            indexes = [row[0] for row in self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='symbols' "
+                "AND sql IS NOT NULL"
+            )]
+            # Rebuild from the columns SCHEMA_SQL creates, so a migrated index and a
+            # fresh one stay identical, and copy by name rather than by position: the
+            # old table has no start_column, so every row takes its default of 0.
+            self.conn.execute("CREATE TABLE symbols_new " + _SYMBOLS_COLUMNS)
+            self.conn.execute(
+                f"INSERT INTO symbols_new ({columns}) SELECT {columns} FROM symbols"
+            )
+            self.conn.execute("DROP TABLE symbols")
+            self.conn.execute("ALTER TABLE symbols_new RENAME TO symbols")
+            for statement in indexes:
+                self.conn.execute(statement)
+            if self.conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("Symbol identity migration violated a foreign key")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys=ON")
 
     # --- Files ---
 
@@ -608,14 +650,14 @@ class Database:
             """INSERT OR REPLACE INTO symbols
                (file_id, kind, name, qualified_name, signature, return_type,
                 parameters, visibility, is_async, is_static,
-                start_line, end_line, content, doc_comment, body_hash,
+                start_line, start_column, end_line, content, doc_comment, body_hash,
                 line_count, parent_symbol_id, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 rec.file_id, rec.kind, rec.name, rec.qualified_name,
                 rec.signature, rec.return_type, params_json, rec.visibility,
                 int(rec.is_async), int(rec.is_static),
-                rec.start_line, rec.end_line, rec.content, rec.doc_comment,
+                rec.start_line, rec.start_column, rec.end_line, rec.content, rec.doc_comment,
                 rec.body_hash, rec.line_count, rec.parent_symbol_id, meta_json,
             ),
         )
@@ -1732,6 +1774,21 @@ class Database:
             return int(row["value"])
         except (TypeError, ValueError):
             return 0
+
+    def get_parse_errors(self) -> dict[str, list[dict]]:
+        """Syntax gaps in partially indexed files, retained across incremental runs."""
+        assert self.conn is not None
+        row = self.conn.execute(
+            "SELECT value FROM schema_info WHERE key = 'parse_errors'"
+        ).fetchone()
+        return json.loads(row["value"]) if row is not None else {}
+
+    def set_parse_errors(self, errors: dict[str, list[dict]]) -> None:
+        assert self.conn is not None
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_info (key, value) VALUES ('parse_errors', ?)",
+            (json.dumps(errors, sort_keys=True),),
+        )
 
     def set_extension_overrides(self, overrides: dict[str, str]) -> None:
         """Record the extra extensions this index reads, as {extension: language}.
