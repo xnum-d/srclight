@@ -27,7 +27,7 @@ AI coding agents (Claude Code, Cursor, etc.) spend **40-60% of their tokens on o
 - **Minimal dependencies** — single SQLite file per repo, no Docker/Redis/vector DB
 - **Fully offline** — no API calls, works air-gapped (Ollama local embeddings)
 - **Incremental** — only re-indexes changed files (content hash detection)
-- **19 languages** — Python, C, C++, C#, Java, Kotlin, Swift, Dart, Go, Rust, JavaScript, TypeScript, PHP, Lua, Bash, SQL, Groovy, CMake, Markdown — include fragments (`.inc`, `.inl`, `.ipp`, `.tcc`) included, plus any extension you declare with `--ext`
+- **21 languages** — Python, C, C++, C#, F#, Elixir, Java, Kotlin, Swift, Dart, Go, Rust, JavaScript, TypeScript, PHP, Lua, Bash, SQL, Groovy, CMake, Markdown — include fragments (`.inc`, `.inl`, `.ipp`, `.tcc`) included, plus any extension you declare with `--ext`
 - **Says what it skipped** — `index_status` names the extensions a run walked past, so an incomplete answer never reads as a complete one
 - **10 document formats** — PDF, DOCX, XLSX, HTML, CSV/TSV, email (.eml), images (PNG/JPG/SVG/etc.), plain text, RST, Markdown
 - **Optional OCR** — PaddleOCR for scanned/image-only PDF pages; pytesseract for images
@@ -117,8 +117,55 @@ flag-less reindexes keep reading those files.
 
 **AI agents:** a non-empty `unindexed_extensions` means the answer you are
 holding is not a whole-tree answer, whatever `truncated` says — cross-check
-with `grep`, or have the extension declared. An empty one is the affirmative
-signal.
+with `grep`, or have the extension declared. Whole-tree coverage also requires
+zero size/read failures and an empty `parse_errors` map.
+
+## F# and Elixir
+
+This checkout adds AST-based indexing for F# (`.fs`, `.fsx`, `.fsi`) and Elixir
+(`.ex`, `.exs`). No extension overrides or embedding service are needed.
+
+- **F#:** namespaces/modules, bindings (including recursive groups and modifiers),
+  record/union/type declarations, fields/cases and members. Signature files use
+  the separate F# signature grammar. XML documentation and `open`/module aliases
+  are indexed; names retain their namespace/module/type/lexical scope.
+- **Elixir:** modules, protocols/implementations, functions, guards, macros,
+  delegates and structs; `@doc`, `@moduledoc` and `@spec`; aliases (including grouped
+  aliases), imports, requires and uses. Functions are identified as
+  `Module.function/arity`, preserving clauses and overloads. Default arguments
+  record the callable arity range.
+- **References:** syntax-derived applications, pipelines, qualified calls and
+  Elixir captures, narrowed by lexical module/aliases and Elixir arity. Comments,
+  strings, declaration heads and quoted Elixir code do not create calls.
+  Runtime receivers are not resolved to a guessed module.
+
+These are syntax indexes, **not compiler-accurate reference services**. F# type
+inference/overloads/higher-order dispatch and Elixir generated or dynamic code
+still require compiler/LSP verification. Unresolved graph candidates retain the
+existing resolution labels.
+
+The forked F# grammar supports nullable type annotations such as `string | null`.
+Other unsupported or invalid syntax can still produce gaps. Recovered symbols
+remain searchable, but `index_status().parse_errors` reports affected paths and
+line ranges, including files with no recovered symbols. The CLI reports partial
+files, workspace project listings carry the same map, and `find_pattern` warns
+that results are not whole-tree answers. Diagnostics survive unchanged-file
+reindexes and disappear when a file is repaired or removed. Source is never
+rewritten to disguise unsupported syntax.
+
+The parser dependencies are pinned to `tree-sitter==0.25.2` and
+`tree-sitter-elixir==0.3.5`. The 0.25.2 runtime avoids a native crash observed
+with 0.26.0 during F# AST traversal. The F# grammar is
+`git+https://github.com/xnum-d/tree-sitter-fsharp@nullable-types`, a fork of
+`ionide/tree-sitter-fsharp` carrying nullable type annotations and long inline
+branch columns; PyPI's `0.3.12` has neither, so the fork installs as
+`0.3.12+srclight.1` to keep the two builds tellable apart. pip and uv both
+resolve that URL, so a fresh clone needs git and network access, not a sibling
+checkout beside this one.
+
+Database schema v6 preserves same-line definitions by qualified identity and
+source column. Existing indexes are migrated without replacing symbol IDs,
+parent links, graph edges or embedding records.
 
 ## Graph resolution labels
 
@@ -141,6 +188,24 @@ are safe to treat as resolved.
 - **Ollama** (optional, for semantic search / embeddings) — [ollama.com](https://ollama.com)
 - **NVIDIA GPU + cupy** (optional, for GPU-accelerated vector search)
 - **Poppler** (optional, for PaddleOCR scanned-PDF support) — `apt install poppler-utils` / `brew install poppler`
+
+## Development with mise
+
+`mise.toml` pins Python 3.12.14 and activates an isolated `.venv`; the application
+project's .NET, Erlang or Elixir dependencies are not required to index source.
+
+```bash
+mise trust
+mise run setup
+mise run test
+mise exec -- srclight index ../my-project --no-embed
+mise exec -- srclight serve --transport stdio --db ../my-project/.srclight/index.db
+```
+
+For an MCP client, use this checkout's absolute `.venv/bin/srclight` executable,
+arguments `["serve", "--transport", "stdio"]`, and the indexed project as `cwd`.
+An explicit `--transport stdio` matters: the upstream default is SSE.
+Install from this checkout, not the unmodified PyPI package, to get these adapters.
 
 ## Quick Start
 
@@ -685,7 +750,7 @@ A survey of 50+ MCP code intelligence servers across all major registries (Offic
 | Multi-repo workspace | ATTACH+UNION | None | None | None |
 | Infrastructure required | `pip install`, SQLite | None | SCIP indexer | Docker, Milvus, OpenAI API |
 | Fully local / private | Yes, zero API calls | Yes | Yes | No (needs OpenAI) |
-| Languages | 19 | Any (regex) | 5 (SCIP) | Any (chunking) |
+| Languages | 21 | Any (regex) | 5 (SCIP) | Any (chunking) |
 | MCP tools | 43 | 2 (grep, glob) | 80+ | ~10 |
 
 Unlike grep-based tools, srclight builds a persistent index with structured lookups. Unlike cloud-based solutions, everything runs locally — your code never leaves your machine. Unlike IDE plugins, srclight works with any MCP client.

@@ -111,10 +111,12 @@ reads) and `unindexed_extensions` (`{{extension: file count}}` this repo holds
 that the last run walked past); `list_projects()` carries the same per project.
 - `oversize_skipped` counts files refused on size; `failed_files` counts files
   that could not be read or parsed. Both are gaps like any unread file.
+- `parse_errors` maps partially parsed source files to syntax-error line ranges.
+  Recovered symbols are useful but do not establish full coverage of those files.
 - The tally covers code that was never read: paths ignored on purpose and inert
   suffixes (config, data, manifests, suffixless files) are left out, while a
   document format missing its optional extra is counted.
-- `find_pattern` attaches both whenever either is non-zero.
+- `find_pattern` attaches coverage gaps, including syntax errors, when present.
   Its `truncated` field reports **pagination only** — never scan coverage — so
   `truncated: false` alongside a non-empty tally is a partial answer, not a
   complete one. Cross-check those files with grep.
@@ -1526,14 +1528,14 @@ def _indexed_extensions(db: Database | None = None) -> list[str]:
 
 
 def _unindexed_warning(unindexed: dict[str, int], oversize: int = 0,
-                       failed: int = 0) -> dict[str, object]:
+                       failed: int = 0, parse_errors: dict | None = None) -> dict[str, object]:
     """Fields that keep a result from reading as a complete scan.
 
     A result whose completeness field says `truncated: false` is taken to
     mean the whole tree was searched. It only ever meant the page was not
     cut short, so when files were never read, the result says so itself.
     """
-    if not unindexed and not oversize and not failed:
+    if not unindexed and not oversize and not failed and not parse_errors:
         return {}
     reasons = []
     if unindexed:
@@ -1544,11 +1546,12 @@ def _unindexed_warning(unindexed: dict[str, int], oversize: int = 0,
         reasons.append(f"{oversize} file(s) exceeded the size limit")
     if failed:
         reasons.append(f"{failed} file(s) could not be read or parsed")
+    if parse_errors:
+        reasons.append(f"{len(parse_errors)} file(s) have syntax gaps and only partial symbols")
     fields: dict[str, object] = {
         "unindexed_note": (
-            f"{' and '.join(reasons)}, so they were never scanned and this result is not a "
-            f"whole-tree answer; `truncated` reports pagination only. Call index_status() "
-            f"for the extensions that are read."
+            f"{' and '.join(reasons)}, so this result is not a whole-tree answer; "
+            f"`truncated` reports pagination only. Call index_status() for coverage details."
         ),
     }
     if unindexed:
@@ -1557,6 +1560,8 @@ def _unindexed_warning(unindexed: dict[str, int], oversize: int = 0,
         fields["oversize_skipped"] = oversize
     if failed:
         fields["failed_files"] = failed
+    if parse_errors:
+        fields["parse_errors"] = parse_errors
     return fields
 
 
@@ -1617,6 +1622,7 @@ def index_status() -> str:
         "oversize_skipped": db.get_oversize_skipped(),
         # Files the run could not read or parse — unread like any other.
         "failed_files": db.get_failed_files(),
+        "parse_errors": db.get_parse_errors(),
     }
 
     if state:
@@ -1658,55 +1664,9 @@ def list_projects() -> str:
     }, indent=2)
 
 
-@mcp.tool()
-async def reindex(path: str | None = None, embed: bool = True) -> str:
-    """Trigger re-indexing of the codebase or a specific path.
-
-    Incrementally updates the index — only re-parses files whose content
-    has changed since the last index.
-
-    Args:
-        path: Optional specific directory to re-index (default: entire repo)
-        embed: Also refresh embeddings, using the model this index already
-            holds (or SRCLIGHT_EMBED_MODEL for an index that holds none yet).
-            Pass False for a keyword-only refresh when you only need
-            search_symbols current: embedding a large backlog calls the
-            embedding model and can take minutes. Not free, though — a
-            reindex drops the embeddings of every symbol it replaces, and
-            with embed=False nothing puts them back, so semantic_search and
-            hybrid_search lose coverage on exactly the files being edited.
-            Does nothing when no model is configured or recorded.
-    """
+def _reindex_run(db: Database, root: Path, embed: bool) -> dict:
+    """Run an incremental index pass and build the tool result payload."""
     global _vector_cache
-    # `path` is used as an index ROOT, not a filter: Indexer reads the whole
-    # database's file list and DELETES every file not under it. So a foreign
-    # path does not pollute an index, it empties it — measured, 3 files to 1
-    # with a success JSON. And `_get_db()` resolves the database by walking up
-    # from the SERVER'S working directory, not from `path`, so in workspace mode
-    # the two are unrelated entirely.
-    #
-    # Refuse in BOTH modes. An earlier guard covered only workspace mode, which
-    # is the safe one; the published plugin runs `serve --transport stdio` with
-    # no --workspace, from the user's own repository, so it never fired where it
-    # was needed. Sub-path reindexing should return as a FILTER, not a new root.
-    if path is not None:
-        requested = Path(path).resolve()
-        configured = Path(_repo_root).resolve() if _repo_root else None
-        if configured is None or requested != configured:
-            return json.dumps({
-                "error": "reindex does not accept a path",
-                "reason": "`path` is treated as a new index root and removes every "
-                          "indexed file outside it, which empties the index.",
-                "hint": "Reindex the configured repository with reindex(), or index "
-                        "another tree from the CLI: `srclight index /path --embed`",
-                "configured_root": str(configured) if configured else None,
-            })
-    root = Path(path) if path else _repo_root
-    if root is None:
-        return json.dumps({"error": "No repo root configured"})
-
-    root = root.resolve()
-    db = _get_db()
     # Release the vector cache BEFORE indexing, not after: the embedding pass
     # rewrites embeddings.npy through os.replace, which fails on Windows while
     # this process still holds the old file mmap'd (np.load(mmap_mode="r")).
@@ -1723,7 +1683,7 @@ async def reindex(path: str | None = None, embed: bool = True) -> str:
     indexer = Indexer(db, config)
     stats = indexer.index(root)
 
-    result = {
+    return {
         "files_indexed": stats.files_indexed,
         "files_unchanged": stats.files_unchanged,
         "files_removed": stats.files_removed,
@@ -1742,12 +1702,93 @@ async def reindex(path: str | None = None, embed: bool = True) -> str:
         },
     }
 
+
+@mcp.tool()
+async def reindex(
+    path: str | None = None, embed: bool = True, project: str | None = None
+) -> str:
+    """Trigger re-indexing of the codebase or a specific path.
+
+    Incrementally updates the index — only re-parses files whose content
+    has changed since the last index.
+
+    Args:
+        path: Optional specific directory to re-index (default: entire repo)
+        embed: Also refresh embeddings, using the model this index already
+            holds (or SRCLIGHT_EMBED_MODEL for an index that holds none yet).
+            Pass False for a keyword-only refresh when you only need
+            search_symbols current: embedding a large backlog calls the
+            embedding model and can take minutes. Not free, though — a
+            reindex drops the embeddings of every symbol it replaces, and
+            with embed=False nothing puts them back, so semantic_search and
+            hybrid_search lose coverage on exactly the files being edited.
+            Does nothing when no model is configured or recorded.
+        project: Project name (required in workspace mode; ignored in
+            single-repo mode).
+    """
+    if _is_workspace_mode():
+        # Workspace mode never sets _repo_root (single-repo only), so the
+        # index root comes from the workspace project registry - the same
+        # resolution graph tools use.
+        if path is not None:
+            return json.dumps({
+                "error": "reindex does not accept a path in workspace mode",
+                "hint": "Reindex one project with reindex(project=...); index "
+                        "another tree from the CLI: `srclight index /path`",
+            })
+        if not project:
+            return _project_required_error("reindex")
+        from .workspace import WorkspaceConfig
+        wconfig = WorkspaceConfig.load(_workspace_name)
+        proj_path = wconfig.projects.get(project)
+        if not proj_path:
+            return _project_not_found_error(project)
+        root = Path(proj_path).resolve()
+        db_path = root / ".srclight" / "index.db"
+        if not db_path.exists():
+            return json.dumps({"error": f"Project '{project}' not indexed"})
+        db = Database(db_path)
+        db.open()
+        try:
+            result = _reindex_run(db, root, embed)
+        finally:
+            db.close()
+        result["project"] = project
+    else:
+        # `path` is used as an index ROOT, not a filter: Indexer reads the whole
+        # database's file list and DELETES every file not under it. So a foreign
+        # path does not pollute an index, it empties it — measured, 3 files to 1
+        # with a success JSON. And `_get_db()` resolves the database by walking up
+        # from the SERVER'S working directory, not from `path`, so in workspace mode
+        # the two are unrelated entirely.
+        #
+        # Refuse in BOTH modes. An earlier guard covered only workspace mode, which
+        # is the safe one; the published plugin runs `serve --transport stdio` with
+        # no --workspace, from the user's own repository, so it never fired where it
+        # was needed. Sub-path reindexing should return as a FILTER, not a new root.
+        if path is not None:
+            requested = Path(path).resolve()
+            configured = Path(_repo_root).resolve() if _repo_root else None
+            if configured is None or requested != configured:
+                return json.dumps({
+                    "error": "reindex does not accept a path",
+                    "reason": "`path` is treated as a new index root and removes every "
+                              "indexed file outside it, which empties the index.",
+                    "hint": "Reindex the configured repository with reindex(), or index "
+                            "another tree from the CLI: `srclight index /path --embed`",
+                    "configured_root": str(configured) if configured else None,
+                })
+        root = Path(path) if path else _repo_root
+        if root is None:
+            return json.dumps({"error": "No repo root configured"})
+        result = _reindex_run(_get_db(), root.resolve(), embed)
+
     # Send notification to connected clients (MCP logging)
     try:
         ctx = mcp.get_context()
         await ctx.info(
-            f"Reindex complete: {stats.files_indexed} files, "
-            f"{stats.symbols_extracted} symbols indexed in {stats.elapsed_seconds:.1f}s"
+            f"Reindex complete: {result['files_indexed']} files, "
+            f"{result['symbols_extracted']} symbols indexed in {result['elapsed_seconds']:.1f}s"
         )
     except Exception:
         pass  # Best effort — client may not support notifications
@@ -2354,10 +2395,11 @@ def embedding_health(project: str | None = None) -> str:
 # --- Tier 7: Import Resolution ---
 
 
-# Import extraction lives in srclight.imports so the indexer can use it
-# without importing the server module. Re-exported here under the old names
-# so find_imports and its tests are unchanged.
-from .imports import IMPORT_PATTERNS, extract_imports as _extract_imports  # noqa: E402
+# Shared import extraction includes syntax adapters as well as regex languages.
+from .imports import (  # noqa: E402
+    SUPPORTED_IMPORT_LANGUAGES,
+    extract_imports as _extract_imports,
+)
 
 
 @mcp.tool()
@@ -2369,7 +2411,8 @@ def find_imports(path: str, project: str | None = None) -> str:
 
     Supports: Python (import/from...import), JavaScript/TypeScript (import/require),
     C/C++ (#include), Go (import), Java/Kotlin (import), Dart (import),
-    Swift (import), C# (using), PHP (use/require/include).
+    Swift (import), C# (using), PHP (use/require/include), F# (open/module aliases),
+    Elixir (alias/import/require/use).
 
     Args:
         path: Relative file path (e.g., 'src/srclight/server.py')
@@ -2401,7 +2444,7 @@ def find_imports(path: str, project: str | None = None) -> str:
             return json.dumps({"error": f"File '{path}' not found in project '{project}'"})
 
         language = file_info["language"]
-        if not language or language not in IMPORT_PATTERNS:
+        if not language or language not in SUPPORTED_IMPORT_LANGUAGES:
             return json.dumps({
                 "file": path,
                 "language": language,
@@ -2435,7 +2478,9 @@ def find_imports(path: str, project: str | None = None) -> str:
                 entry["names"] = imp["names"]
 
             resolved_to = None
-            names_to_try = imp["names"] if imp["names"] else [imp["module"].split(".")[-1]]
+            names_to_try = ([imp["module"], imp["module"].split(".")[-1], *imp["names"]]
+                            if language in ("fsharp", "elixir") else
+                            imp["names"] or [imp["module"].split(".")[-1]])
             for name in names_to_try:
                 for batch in wdb._iter_batches(project_filter=project):
                     for schema, pname in batch:
@@ -2488,7 +2533,7 @@ def find_imports(path: str, project: str | None = None) -> str:
         return json.dumps({"error": f"File '{path}' not found in index"})
 
     language = file_rec.language
-    if not language or language not in IMPORT_PATTERNS:
+    if not language or language not in SUPPORTED_IMPORT_LANGUAGES:
         return json.dumps({
             "file": path,
             "language": language,
@@ -2520,7 +2565,9 @@ def find_imports(path: str, project: str | None = None) -> str:
             entry["names"] = imp["names"]
 
         resolved_to = None
-        names_to_try = imp["names"] if imp["names"] else [imp["module"].split(".")[-1]]
+        names_to_try = ([imp["module"], imp["module"].split(".")[-1], *imp["names"]]
+                        if language in ("fsharp", "elixir") else
+                        imp["names"] or [imp["module"].split(".")[-1]])
         for name in names_to_try:
             result = db.resolve_import(name, hint_path=path)
             if result:
@@ -2693,6 +2740,7 @@ def find_pattern(
         unindexed = db.get_unindexed_extensions()
         oversize = db.get_oversize_skipped()
         failed = db.get_failed_files()
+        parse_errors = db.get_parse_errors()
         db.close()
     else:
         db = _get_db()
@@ -2702,6 +2750,7 @@ def find_pattern(
         unindexed = db.get_unindexed_extensions()
         oversize = db.get_oversize_skipped()
         failed = db.get_failed_files()
+        parse_errors = db.get_parse_errors()
 
     # Asking for limit + 1 is how truncation is detected: holding one more than
     # requested proves more exist. Exact, and the scan still stops early.
@@ -2724,7 +2773,7 @@ def find_pattern(
         "file_count": len(by_file),
         "by_file": by_file,
     }
-    result.update(_unindexed_warning(unindexed, oversize, failed))
+    result.update(_unindexed_warning(unindexed, oversize, failed, parse_errors))
     if project:
         result["project"] = project
     if language:

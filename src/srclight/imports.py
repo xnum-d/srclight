@@ -12,7 +12,7 @@ import re
 
 from .refmask import mask_noncode
 
-__all__ = ["IMPORT_PATTERNS", "extract_imports"]
+__all__ = ["IMPORT_PATTERNS", "SUPPORTED_IMPORT_LANGUAGES", "extract_imports"]
 
 # Nothing may precede the loader's name: `self.require(x)` is some table's own
 # method, and `myrequire(x)` somebody else's function.
@@ -57,9 +57,17 @@ IMPORT_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
+SUPPORTED_IMPORT_LANGUAGES = frozenset(IMPORT_PATTERNS) | {"fsharp", "elixir"}
+
 
 def extract_imports(content: str, language: str) -> list[dict]:
     """Extract import statements from file content using regex patterns."""
+    if language == "fsharp":
+        from .fsharp import extract_imports as extract_fsharp_imports
+        return extract_fsharp_imports(content)
+    if language == "elixir":
+        from .elixir import extract_imports as extract_elixir_imports
+        return extract_elixir_imports(content)
     patterns = IMPORT_PATTERNS.get(language, [])
     if not patterns:
         return []

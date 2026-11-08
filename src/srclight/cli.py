@@ -309,6 +309,10 @@ def index(path: str, db_path: str | None, embed_model: str | None, no_embed: boo
     for step in line.summary():
         click.echo(step)
     click.echo(f"  Database:    {db_stats['db_size_mb']} MB")
+    parse_errors = db.get_parse_errors()
+    if parse_errors:
+        click.echo(f"  Syntax gaps: {len(parse_errors)} file(s) partially indexed; "
+                   "see index_status for locations")
 
     if resolved_model:
         emb_stats = db.embedding_stats()
@@ -416,6 +420,12 @@ def status(db_path: str | None):
     click.echo(f"  Files:       {stats['files']}")
     click.echo(f"  Symbols:     {stats['symbols']}")
     click.echo(f"  Edges:       {stats['edges']}")
+    parse_errors = db.get_parse_errors()
+    if parse_errors:
+        click.echo(f"  Syntax gaps: {len(parse_errors)} partially indexed file(s)")
+        for path, errors in parse_errors.items():
+            lines = ", ".join(str(error["start_line"]) for error in errors[:8])
+            click.echo(f"    {path}: {lines}")
 
     if stats["languages"]:
         click.echo(f"\n  Languages:")

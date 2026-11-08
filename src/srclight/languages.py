@@ -659,6 +659,15 @@ _LUA_QUERY = """
 
 
 LANGUAGES: dict[str, LanguageConfig] = {
+    # These use language-specific AST extractors rather than generic tag queries.
+    "fsharp": LanguageConfig(
+        name="fsharp", extensions=(".fs", ".fsx", ".fsi"),
+        loader="tree_sitter_fsharp", symbol_query="",
+    ),
+    "elixir": LanguageConfig(
+        name="elixir", extensions=(".ex", ".exs"),
+        loader="tree_sitter_elixir", symbol_query="",
+    ),
     "python": LanguageConfig(
         name="python",
         extensions=(".py", ".pyi"),

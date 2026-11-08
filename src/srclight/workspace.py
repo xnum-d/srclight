@@ -466,6 +466,7 @@ class WorkspaceDB:
             "embedded": embedded, "model": model, "dimensions": dimensions,
             "unindexed_extensions": unindexed, "extension_overrides": overrides,
             "oversize_skipped": oversize, "failed_files": failed,
+            "parse_errors": self._read_json_setting(schema, "parse_errors"),
         }
 
     def _read_count_setting(self, schema: str, key: str) -> int:
@@ -598,6 +599,7 @@ class WorkspaceDB:
                 "oversize_skipped": st.get("oversize_skipped", 0),
                 # Files this project's last run could not read.
                 "failed_files": st.get("failed_files", 0),
+                "parse_errors": st.get("parse_errors", {}),
             })
 
         # Also list unindexed projects

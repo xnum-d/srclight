@@ -2280,11 +2280,13 @@ class _EdgeScanner:
                     # `class Heap;`: a forward declaration, or a definition.
                     "forward": bool(c_class and bodiless),
                     "c_class_body": bool(c_class and not bodiless)}
+            info["native"] = json.loads(metadata) if metadata else {}
             symbol_info[sym_id] = info
             if name not in name_to_symbols:
                 name_to_symbols[name] = []
             name_to_symbols[name].append(info)
 
+        self.native_symbols = name_to_symbols
         filtered_names = {
             name: syms for name, syms in name_to_symbols.items()
             if not graph_name_excluded(name)
@@ -2460,6 +2462,71 @@ class _EdgeScanner:
             return sd, "same_dir"
         return targets, "name_only"
 
+    def _scan_native(self, row) -> list[tuple[int, int, float, str]]:
+        """Use AST references for languages whose application syntax is not C-like.
+
+        Syntax narrows candidates; unresolved names retain the existing evidence
+        labels, never a claim of compiler/type-checked resolution.
+        """
+        metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        source_file = row["file_path"].replace("\\", "/")
+        source_module = metadata.get("module")
+        imported = self._imports_for(source_file, row["language"])
+        found: dict[int, tuple[int, int, float, str]] = {}
+        for reference in metadata.get("references", []):
+            name = reference["name"]
+            targets = [
+                target for target in self.native_symbols.get(name, [])
+                if target["id"] != row["id"]
+                and target["native"].get("language") == row["language"]
+                and target["kind"] in (
+                    "function", "method", "macro", "property", "variable", "constant")
+            ]
+            arity = reference.get("arity")
+            if arity is not None:
+                targets = [t for t in targets if arity in t["native"].get(
+                    "arities", [t["native"].get("arity")])]
+            qualified = reference.get("qualified_name")
+            decided = None
+            if qualified:
+                exact = [t for t in targets if t["qualified"] == qualified or (
+                    row["language"] == "elixir" and (t["qualified"] or "").rsplit("/", 1)[0]
+                    == qualified.rsplit("/", 1)[0])]
+                targets = exact or [
+                    t for t in targets
+                    if row["language"] == "fsharp"
+                    and (t["qualified"] or "").endswith("." + qualified)
+                ]
+                if targets and len({t["qualified"] for t in targets}) == 1:
+                    decided = "same_file" if all(
+                        t["file"] == source_file for t in targets) else "import"
+            elif source_module:
+                scopes = [source_module]
+                if row["language"] == "fsharp":
+                    scope = row["qualified_name"] or source_module
+                    scopes = []
+                    while scope:
+                        scopes.append(scope)
+                        scope = scope.rsplit(".", 1)[0] if "." in scope else ""
+                for scope in scopes:
+                    local = [t for t in targets if t["native"].get("module") == scope]
+                    if local:
+                        targets = local
+                        break
+            if not targets:
+                continue
+            if decided:
+                chosen, resolution = targets, decided
+            else:
+                chosen, resolution = self._select_targets(targets, source_file, imported, name)
+            if resolution == "name_only" and len(chosen) > GRAPH_MAX_FANOUT:
+                continue
+            for target in chosen:
+                confidence = self._compute_confidence(source_file, target["file"])
+                if confidence >= 0.2:
+                    found[target["id"]] = (row["id"], target["id"], confidence, resolution)
+        return list(found.values())
+
     def scan(self, row) -> list[tuple[int, int, float, str]]:
         """The (source, target, confidence, resolution) edges of one symbol.
 
@@ -2468,6 +2535,8 @@ class _EdgeScanner:
         so two runs disagreed.
         """
         from .refmask import mask_noncode
+        if row["language"] in ("fsharp", "elixir"):
+            return self._scan_native(row)
 
         if self.match_names is None:
             return []
@@ -2619,6 +2688,7 @@ class Indexer:
         self._parsers: dict[str, Parser] = {}
         self._queries: dict[str, Query] = {}
         self._ext_overrides: dict[str, str] = {}
+        self._parse_errors: dict[str, list[dict]] = {}
 
         # Remove ignore patterns for extensions that have active extractors
         active_exts = _active_doc_extensions()
@@ -2776,6 +2846,7 @@ class Indexer:
 
         self._ext_overrides = self._resolve_extension_overrides()
         ignore_patterns = self._effective_ignore_patterns()
+        self._parse_errors = self.db.get_parse_errors()
 
         # Try to use git ls-files for .gitignore-aware file listing
         git_files = _git_tracked_files(root)
@@ -2928,6 +2999,8 @@ class Indexer:
 
                 # Parse and extract symbols
                 n_symbols = self._extract_symbols(file_id, rel_path, raw, lang)
+                if lang not in ("fsharp", "elixir"):
+                    self._parse_errors.pop(rel_path, None)
                 self.db.restore_embeddings_for_file(file_id, kept_embeddings)
                 stats.symbols_extracted += n_symbols
                 stats.files_indexed += 1
@@ -2955,6 +3028,7 @@ class Indexer:
             if file_rec and file_rec.id is not None:
                 self.db.delete_file(file_rec.id)
                 stats.files_removed += 1
+            self._parse_errors.pop(old_path, None)
 
         # Build call graph and inheritance edges (second pass)
         if stats.files_indexed > 0:
@@ -3035,6 +3109,7 @@ class Indexer:
         self.db.set_unindexed_extensions(unindexed_exts)
         self.db.set_oversize_skipped(oversize_skipped)
         self.db.set_failed_files(failed_files)
+        self.db.set_parse_errors(self._parse_errors)
 
         self.db.commit()
 
@@ -3114,6 +3189,8 @@ class Indexer:
         self, file_id: int, rel_path: str, source: bytes, lang: str,
     ) -> int:
         """Parse a file and extract symbols. Returns count of symbols extracted."""
+        if lang in ("fsharp", "elixir"):
+            return self._extract_native_symbols(file_id, rel_path, source, lang)
         if lang == "markdown":
             return self._extract_markdown_symbols(file_id, rel_path, source)
 
@@ -3369,6 +3446,30 @@ class Indexer:
             count += 1
 
         return count
+
+    def _extract_native_symbols(
+        self, file_id: int, rel_path: str, source: bytes, lang: str,
+    ) -> int:
+        if lang == "fsharp":
+            from .fsharp import extract_symbols
+        else:
+            from .elixir import extract_symbols
+        symbols, errors = extract_symbols(source, file_id, rel_path)
+        if errors:
+            self._parse_errors[rel_path] = errors
+            logger.warning("%s: %d syntax gap(s); recovered symbols are partial",
+                           rel_path, len(errors))
+        else:
+            self._parse_errors.pop(rel_path, None)
+        # Logical scopes also distinguish generated defimpl modules sharing one span.
+        scope_ids: dict[str, int] = {}
+        for sym in sorted(symbols, key=lambda s: (
+                s.metadata["start_byte"], -s.metadata["end_byte"])):
+            sym.parent_symbol_id = scope_ids.get(sym.metadata.get("module", ""))
+            sym_id = self.db.insert_symbol(sym, rel_path)
+            if sym.qualified_name:
+                scope_ids[sym.qualified_name] = sym_id
+        return len(symbols)
 
     def _extract_markdown_symbols(
         self, file_id: int, rel_path: str, source: bytes,
