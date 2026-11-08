@@ -47,7 +47,7 @@ dependencies = [
     "tree-sitter-sql>=0.3.0",
     "tree-sitter-groovy>=0.1.0",
     "tree-sitter-lua>=0.5.0",
-    "tree-sitter-fsharp @ git+https://github.com/xnum-d/tree-sitter-fsharp@nullable-types",
+    "tree-sitter-fsharp @ git+https://github.com/xnum-d/tree-sitter-fsharp@main",
     "tree-sitter-elixir==0.3.5",
     "numpy>=1.26.0",
     "networkx>=3.0",
