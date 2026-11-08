@@ -15,7 +15,7 @@ upstream at the same base version. Install this fork from its git URL — see [I
 | Upstream | `https://github.com/srclight/srclight` (branch `develop`) |
 | This fork | `https://github.com/xnum-d/srclight` (default branch `develop`) |
 | Fork point | `8fa3826` — *fix: stop returning learnings past their ttl_days…* |
-| Companion grammar fork | `https://github.com/xnum-d/tree-sitter-fsharp` (branch `main`), forked from `ionide/tree-sitter-fsharp` |
+| Companion grammar fork | `https://github.com/xnum-d/tree-sitter-fsharp`, pinned to tag `v0.3.12+srclight.1`; forked from `ionide/tree-sitter-fsharp` |
 | License | MIT, unchanged from upstream |
 
 ## What this fork changes
@@ -159,7 +159,7 @@ The same applies to the grammar: after changing `tree-sitter-fsharp`, reinstall 
 graph LR
   A["pip / uv"] --> B["xnum-d/srclight@develop<br/>hatchling wheel"]
   B --> C["PyPI: tree-sitter==0.25.2,<br/>tree-sitter-elixir==0.3.5, mcp, numpy, …"]
-  B --> D["git: xnum-d/tree-sitter-fsharp@main<br/>setuptools + cc → _binding.abi3.so"]
+  B --> D["git: xnum-d/tree-sitter-fsharp@v0.3.12+srclight.1<br/>setuptools + cc → _binding.abi3.so"]
   D --> E["ionide/tree-sitter-fsharp<br/>(upstream grammar)"]
 ```
 
@@ -179,14 +179,20 @@ and why `.github/workflows/publish.yml` is inert.
   native crash observed with 0.26.0 during F# AST traversal; the full test suite passes
   identically on 0.26.0, so the pin is unverified rather than disproven. Re-check it against
   a large real F# codebase before relaxing it.
-- **Dart is advertised but not installed.** `languages.py` registers `dart` with the loader
-  `tree_sitter_dart`, and neither upstream nor this fork declares `tree-sitter-dart` as a
-  dependency. `get_language()` swallows the `ImportError` and returns `None`, so `.dart`
-  files are silently skipped and `tests/test_indexer.py::test_index_dart` fails on a clean
-  checkout. The package exists on PyPI (`tree-sitter-dart 0.1.0`).
 - **Environment-specific test failures.** On macOS, `test_read_only_uri_survives_metacharacters`
   (7 parameterisations) and `test_hook_still_runs_on_linux` fail on an untouched upstream
   checkout too; they are not caused by this fork's changes.
+- **Registry manifests still describe upstream.** `server.json` declares
+  `io.github.srclight/srclight` with `registryType: pypi`, `identifier: srclight` and a stale
+  `version: 0.12.0`; `glama.json` names upstream's maintainer; `README.md` opens with
+  `<!-- mcp-name: io.github.srclight/srclight -->`. None of them can point at this fork: the
+  MCP registry schema's `registryType` enumerates package registries (`npm`, `pypi`, `oci`,
+  `nuget`, `mcpb`) with no VCS source, and the fork cannot be on PyPI because of the
+  direct-URL grammar dependency. The files are left as upstream wrote them so merges stay
+  clean — publishing them unchanged would advertise the wrong package.
+  `.github/workflows/publish.yml` is inert here for the same reason: it needs a GitHub
+  Release and the `pypi` environment. An OCI artifact would be the only route to a registry,
+  and nothing in this fork builds one.
 
 ## Development
 
@@ -216,6 +222,18 @@ the generated `src/parser.c`, `src/grammar.json` and `src/node-types.json` — t
 because a git install builds straight from them. The branch `nullable-types` carries the same
 commits as `main` and is kept as the vehicle for a possible pull request to
 `ionide/tree-sitter-fsharp`.
+
+srclight depends on the grammar **by tag**, not by branch:
+`@v0.3.12+srclight.1`. `main` is where grammar work lands and where tags are cut, so a
+grammar change reaches srclight only when someone bumps the tag in `pyproject.toml` —
+deliberately, with the indexer's tests run against the new build. A tagged srclight commit
+therefore reproduces exactly, instead of silently picking up whatever `main` points at that
+day. To test a grammar change without tagging, install it into the working environment
+directly:
+
+```bash
+pip install --force-reinstall --no-deps /path/to/tree-sitter-fsharp
+```
 
 ## Repository topology
 
