@@ -164,7 +164,7 @@ rewritten to disguise unsupported syntax.
 The parser dependencies are pinned to `tree-sitter==0.25.2` and
 `tree-sitter-elixir==0.3.5`. The 0.25.2 runtime avoids a native crash observed
 with 0.26.0 during F# AST traversal. The F# grammar is
-`git+https://github.com/xnum-d/tree-sitter-fsharp@main`, a fork of
+`git+https://github.com/xnum-d/tree-sitter-fsharp@v0.3.12+srclight.1`, a fork of
 `ionide/tree-sitter-fsharp` carrying nullable type annotations and long inline
 branch columns; PyPI's `0.3.12` has neither, so the fork installs as
 `0.3.12+srclight.1` to keep the two builds tellable apart. pip and uv both
