@@ -85,6 +85,11 @@ select = ["E", "F", "I", "W"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
+# The F# grammar resolves from a fork URL, and hatchling rejects direct
+# references in project.dependencies unless this is set.
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/srclight"]
 
