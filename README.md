@@ -9,8 +9,8 @@
 > **This is a fork.** [xnum-d/srclight](https://github.com/xnum-d/srclight) adds AST-based
 > indexing for **F#** and **Elixir**, a schema (v6) that keeps same-line definitions distinct,
 > and `parse_errors` reporting for files a grammar could only partially parse. It is **not on
-> PyPI**: `pip install srclight` installs the unmodified upstream release, which reports the
-> same version (`0.25.3`) and has none of this. Install with
+> PyPI**: `pip install srclight` installs the unmodified upstream release (`0.25.3`), which
+> has none of this. This fork reports `0.25.3+native.1`. Install with
 > `pip install "srclight @ git+https://github.com/xnum-d/srclight@develop"`.
 > Details, limitations and the upstream sync workflow: [docs/fork.md](docs/fork.md).
 
@@ -248,8 +248,8 @@ pip install "srclight[gpu] @ $SRC"
 # Everything (docs + pdf + ocr + paddleocr + gpu)
 pip install "srclight[all] @ $SRC"
 
-# NOTE: plain `pip install srclight` installs the upstream PyPI release, which
-# reports the same version (0.25.3) and has no F# or Elixir support. Re-run with
+# NOTE: plain `pip install srclight` installs the upstream PyPI release (0.25.3),
+# which has no F# or Elixir support; this fork reports 0.25.3+native.1. Re-run with
 # --force-reinstall after the branch moves: the version number does not change.
 
 # Index your project

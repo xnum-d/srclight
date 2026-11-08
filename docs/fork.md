@@ -6,8 +6,9 @@ indexing for **F#** and **Elixir**, a schema that keeps same-line definitions di
 and reporting for files a grammar could only partially parse.
 
 It is **not published on PyPI**. `pip install srclight` installs the unmodified upstream
-release, which has the same version number (`0.25.3`) and none of the changes below.
-Install this fork from its git URL — see [Install](#install).
+release (`0.25.3`), which has none of the changes below. This fork reports
+`0.25.3+native.1`: the `+native.N` local segment is what separates a fork build from
+upstream at the same base version. Install this fork from its git URL — see [Install](#install).
 
 | | |
 |---|---|
@@ -89,13 +90,15 @@ Verify that you got the fork and not upstream:
 
 ```bash
 .venv/bin/pip show srclight tree-sitter-fsharp | grep -E '^(Name|Version)'
-# srclight              0.25.3
-# tree-sitter-fsharp    0.3.12+srclight.1     ← the +srclight.1 local version marks the fork build
+# srclight              0.25.3+native.1       ← upstream reports plain 0.25.3
+# tree-sitter-fsharp    0.3.12+srclight.1     ← PyPI's build reports plain 0.3.12
 ```
 
-`0.3.12+srclight.1` is the tell: PyPI's `tree-sitter-fsharp 0.3.12` has the same version
-number but neither nullable type annotations nor the scanner fixes, which is why the fork
-carries a distinct local version.
+Both local segments are the tell. PyPI's `tree-sitter-fsharp 0.3.12` carries the same base
+number but neither nullable type annotations nor the scanner fixes, and PyPI's
+`srclight 0.25.3` has no F# or Elixir support. A `+` suffix on either package means the build
+came from a fork. Note that PEP 440 ignores the local segment when matching, so an installed
+`0.25.3+native.1` also satisfies `srclight==0.25.3`.
 
 ### As a dependency of another project
 
@@ -137,9 +140,9 @@ pass `--transport stdio` explicitly — the default transport is SSE:
 
 ### Updating
 
-A branch reference does not invalidate an existing install: the version is still `0.25.3`,
-so pip reports *Requirement already satisfied* and does nothing even when the branch has
-moved. Force it:
+A branch reference does not invalidate an existing install: the version is still
+`0.25.3+native.1`, so pip reports *Requirement already satisfied* and does nothing even when
+the branch has moved. Force it:
 
 ```bash
 pip install --force-reinstall "srclight @ git+https://github.com/xnum-d/srclight@develop"
@@ -166,10 +169,12 @@ and why `.github/workflows/publish.yml` is inert.
 
 ## Known limitations
 
-- **Version identity.** `version = "0.25.3"` matches the upstream PyPI release. Anything
-  resolving `srclight==0.25.3` from an index gets upstream, and `pip show` cannot tell the
-  two apart. Bumping to a local version (`0.25.3+native.1`) would fix that and is not done
-  yet.
+- **Version identity is carried by the local segment only.** The fork reports
+  `0.25.3+native.1`, upstream `0.25.3`. PEP 440 ignores the local part when matching, so
+  `srclight==0.25.3` is satisfied by either build and an index resolve still fetches
+  upstream — only a direct git URL reliably selects the fork. The number lives in two places
+  (`pyproject.toml` and `srclight/__init__.py`, which is what `srclight --version` prints);
+  `test_package_version_matches_the_module` keeps them equal.
 - **`tree-sitter` pinned to `==0.25.2`.** Upstream allowed `>=0.25.0`. The pin records a
   native crash observed with 0.26.0 during F# AST traversal; the full test suite passes
   identically on 0.26.0, so the pin is unverified rather than disproven. Re-check it against

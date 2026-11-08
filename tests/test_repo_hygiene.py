@@ -180,3 +180,17 @@ def test_no_private_workstation_references_in_tracked_text():
             if any(p.search(line) for p in patterns) or _names_private_project(line):
                 offenders.append(f"  {rel}:{n}: {line.strip()[:120]}")
     assert not offenders, "Private references in tracked public files:\n" + "\n".join(offenders)
+
+
+def test_package_version_matches_the_module():
+    """`srclight --version` reads __init__.__version__; pip reads pyproject.
+
+    Two places hold the number, so a bump that misses one ships a CLI that lies
+    about which build it is — the exact confusion a fork version exists to end.
+    """
+    import tomllib
+
+    from srclight import __version__
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["version"] == __version__
