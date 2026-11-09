@@ -27,6 +27,8 @@ dependencies = [
     "mcp>=2,<3",
     "ironmcp>=0.3.0",
     "click>=8.1.0",
+    # Hard pin: tree-sitter 0.26.0 segfaults in the F# extractor on real code.
+    # The test suite passes on 0.26.0, so only a real corpus exposes it — see docs/fork.md.
     "tree-sitter==0.25.2",
     "tree-sitter-c>=0.24.0",
     "tree-sitter-cpp>=0.23.0",

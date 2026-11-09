@@ -175,10 +175,25 @@ and why `.github/workflows/publish.yml` is inert.
   upstream — only a direct git URL reliably selects the fork. The number lives in two places
   (`pyproject.toml` and `srclight/__init__.py`, which is what `srclight --version` prints);
   `test_package_version_matches_the_module` keeps them equal.
-- **`tree-sitter` pinned to `==0.25.2`.** Upstream allowed `>=0.25.0`. The pin records a
-  native crash observed with 0.26.0 during F# AST traversal; the full test suite passes
-  identically on 0.26.0, so the pin is unverified rather than disproven. Re-check it against
-  a large real F# codebase before relaxing it.
+- **`tree-sitter` must stay at `==0.25.2`.** Upstream allowed `>=0.25.0`. Version 0.26.0
+  segfaults inside the F# extractor on real code: indexing `giraffe-fsharp/Giraffe` dies at
+  `src/Giraffe/Core.fs` with exit 139, and `fsprojects/FSharp.Data` dies at `build/build.fs`.
+  Both reproduce on every run; both index cleanly on 0.25.2 (Giraffe: 66 files, 3279 symbols,
+  2175 edges, exit 0). **The test suite does not catch this** — it passes identically on
+  0.26.0 — so do not relax the pin on the strength of a green pytest run. Repro in about
+  30 seconds, without touching your working environment:
+
+  ```bash
+  pip install --target /tmp/ts26 --no-deps tree-sitter==0.26.0
+  git clone --depth 1 https://github.com/giraffe-fsharp/Giraffe /tmp/giraffe
+  # from the repository root:
+  PYTHONPATH=/tmp/ts26:src .venv/bin/python -c "import sys; sys.argv=['srclight','index','/tmp/giraffe','--db','/tmp/g.db','--no-embed']; from srclight.cli import main; main()"
+  # → exit 139 (SIGSEGV) at [26/66] src/Giraffe/Core.fs
+  # drop /tmp/ts26 from PYTHONPATH and the same command exits 0
+  ```
+
+  No minimal reduction of the crashing input is known yet, which is why the pin is a version
+  pin rather than a workaround in the extractor.
 - **Environment-specific test failures.** On macOS, `test_read_only_uri_survives_metacharacters`
   (7 parameterisations) and `test_hook_still_runs_on_linux` fail on an untouched upstream
   checkout too; they are not caused by this fork's changes.
@@ -203,8 +218,9 @@ mise run test                  # pytest
 .venv/bin/ruff check src tests
 ```
 
-Expected on macOS: `907 passed, 9 failed, 17 skipped` — the nine are the Dart and
-environment cases listed above.
+Expected on macOS: `909 passed, 8 failed, 17 skipped`. The eight are
+`test_read_only_uri_survives_metacharacters` (7 parameterisations) and
+`test_hook_still_runs_on_linux`; both fail on an untouched upstream checkout too.
 
 Conventions this fork follows from upstream: lowercase imperative commit subjects
 (`feat:`, `fix:`, `perf:`, `chore:`), and `tests/test_repo_hygiene.py` guards the README
